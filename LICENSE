@@ -1,0 +1,10 @@
+Perf user event modules licensing
+Francis Giraldeau
+2014-12-09
+
+* LGPLv2.1/GPLv2 dual-license
+
+The files contained within this package are licensed under
+LGPLv2.1/GPLv2 dual-license (see lgpl-2.1.txt and gpl-2.0.txt for
+details).
+
