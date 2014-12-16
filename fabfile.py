@@ -4,7 +4,7 @@ from fabric.operations import put, get
 env.user = "ubuntu"
 
 @task
-@hosts("trusty-dev.vm")
+@hosts("kernel-dev.phd.vm")
 def build():
     with cd("~/perfuser"):
         run("echo $(pwd)")

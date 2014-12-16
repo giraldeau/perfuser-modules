@@ -3,10 +3,9 @@
 BIN=/home/ubuntu/perfuser/tests/test_ioctl
 
 sudo dmesg -c > /dev/null
-sudo $BIN
-sudo perf record -e faults -- $BIN
+sudo perf record -c 1 -e faults -- $BIN
 
 sudo insmod ../perfuser.ko
-sudo perf record -e faults -- $BIN
+sudo perf record -c 1 -e faults -- $BIN go
 sudo rmmod perfuser
 sudo dmesg -c
