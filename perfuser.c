@@ -36,10 +36,7 @@ struct perfuser_val {
 static DEFINE_HASHTABLE(map, 3);
 static DEFINE_SPINLOCK(map_lock);
 
-void perf_output_sample_probe(struct perf_output_handle *handle,
-			struct perf_event_header *header,
-			struct perf_sample_data *data,
-			struct perf_event *event)
+static int perf_output_sample_probe(struct kprobe *p, struct pt_regs *regs)
 {
 	int ret;
 	u32 hash;
@@ -47,39 +44,24 @@ void perf_output_sample_probe(struct perf_output_handle *handle,
 	struct perfuser_key key;
 	struct perfuser_val *val;
 	struct task_struct *task;
-	int bkt;
 
 	task = get_current();
-
-	printk("perfuser probe current=%d\n", task->pid);
-	hash_for_each_safe(map, bkt, next, val, hlist) {
-		printk("perfuser probe hash task=%d sig=%d\n", val->ptid, val->signo);
-	}
 
 	key.ptid = task->pid;
 	hash = jhash(&key, sizeof(key), 0);
 	hash_for_each_possible_safe(map, val, next, hlist, hash) {
 		if (val->ptid != key.ptid)
 			continue;
-		printk("perfuser probe send_signal task=%d\n", task->pid);
 		/* send signal to this specific thread */
 		ret = send_sig_info(SIGUSR1, SEND_SIG_NOINFO, task);
-		if (ret < 0)
-			printk("perfuser probe send_sig_info error=%d\n", ret);
-		else
-			printk("perfuser probe send_sig_info OK\n");
 		break;
 	}
-
-    jprobe_return();
-    return;
+	return 0;
 }
 
-static struct jprobe perf_sample_jprobe = {
-		.entry = perf_output_sample_probe,
-		.kp = {
-			.symbol_name = "perf_output_sample",
-		},
+static struct kprobe perf_sample_kprobe = {
+	.symbol_name = "perf_output_end",
+	.pre_handler = perf_output_sample_probe,
 };
 
 
@@ -167,12 +149,14 @@ int __init perfuser_init(void)
 		goto error;
 	}
 
-	ret = register_jprobe(&perf_sample_jprobe);
+	ret = register_kprobe(&perf_sample_kprobe);
 	if (ret < 0) {
-		printk("register_jprobe failed, returned %d\n", ret);
+		printk("register_kprobe failed, returned %d\n", ret);
 		ret = -1;
 		goto error;
 	}
+	printk("kprobe_ftrace=%d\n", kprobe_ftrace(&perf_sample_kprobe));
+	printk("kprobe_optimized=%d\n", kprobe_optimized(&perf_sample_kprobe));
 
 	return ret;
 
@@ -188,7 +172,7 @@ void __exit perfuser_exit(void)
 {
 	if (perfuser_proc_dentry)
 		remove_proc_entry(PERFUSER_PROC, NULL);
-	unregister_jprobe(&perf_sample_jprobe);
+	unregister_kprobe(&perf_sample_kprobe);
 }
 module_exit(perfuser_exit);
 
