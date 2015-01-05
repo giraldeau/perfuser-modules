@@ -11,9 +11,22 @@
 #define PERFUSER_PROC "perfuser"
 #define PERFUSER_PATH "/proc/" PERFUSER_PROC
 
+enum perfuser_cmd {
+	PERFUSER_REGISTER = 0,
+	PERFUSER_UNREGISTER = 1,
+	PERFUSER_STATUS = 2,
+	PERFUSER_DEBUG = 3,
+};
+
+/*
+ * Structure to exchange data from and to kernel module.
+ */
+struct perfuser_info {
+	int cmd;
+	int sig;
+} __attribute__((packed));
+
 /* Borrow some unused range of LTTng ioctl ;-) */
-#define PERFUSER_REGISTER 		_IO(0xF6, 0x90)
-#define PERFUSER_UNREGISTER 		_IO(0xF6, 0x91)
-#define PERFUSER_DEBUG	 		_IO(0xF6, 0x99)
+#define PERFUSER_IOCTL 		_IO(0xF6, 0x90)
 
 #endif /* PERFUSER_ABI_H_ */

@@ -64,6 +64,10 @@ static struct kprobe perf_sample_kprobe = {
 	.pre_handler = perf_output_sample_probe,
 };
 
+static int check_signal(unsigned long sig)
+{
+	return (sig == SIGUSR1 || sig == SIGUSR2);
+}
 
 long perfuser_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
@@ -71,29 +75,36 @@ long perfuser_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	unsigned long flags;
 	struct perfuser_key key;
 	struct perfuser_val *val;
+	struct perfuser_info info;
 	struct hlist_node *next;
 	struct task_struct *task = get_current();
-	int found = 0;
 	int ret = 0;
 	int bkt;
+	void __user *uinfo = (void *) arg;
+
+	if (cmd != PERFUSER_IOCTL)
+		return -ENOIOCTLCMD;
+
+	if (copy_from_user(&info, uinfo, sizeof(struct perfuser_info)))
+		return -EFAULT;
 
 	key.ptid = task->pid;
 	hash = jhash(&key, sizeof(key), 0);
 
-	switch(cmd) {
+	switch(info.cmd) {
 	case PERFUSER_REGISTER:
+		if (!check_signal(info.sig))
+			return -EINVAL;
+		/* check if already registered */
 		hash_for_each_possible_safe(map, val, next, hlist, hash) {
 			if (val->ptid == key.ptid) {
-				// already registered, nothing to do
-				found = 1;
-				break;
+				return 0;
 			}
 		}
-		if (found)
-			break;
+		/* do registration */
 		val = kzalloc(sizeof(struct perfuser_val), GFP_KERNEL);
 		val->ptid = key.ptid;
-		val->signo = SIGUSR1;
+		val->signo = info.sig;
 		spin_lock_irqsave(&map_lock, flags);
 		hash_add(map, &val->hlist, hash);
 		spin_unlock_irqrestore(&map_lock, flags);
@@ -118,7 +129,7 @@ long perfuser_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		}
 		break;
 	default:
-		ret = -ENOIOCTLCMD;
+		ret = -ENOTSUPP;
 		break;
 	}
 
