@@ -1,11 +1,13 @@
 from fabric.api import local, env, run, cd, sudo, prefix, execute, lcd, task, hosts
 from fabric.operations import put, get
+from fabric.contrib.project import rsync_project
 
-env.user = "ubuntu"
+import os
 
 @task
-@hosts("kernel-dev.phd.vm")
 def build():
+    local_dir = os.path.abspath(os.curdir) + "/"
+    rsync_project("~/perfuser/", local_dir)
     with cd("~/perfuser"):
         run("echo $(pwd)")
         run("make clean")
