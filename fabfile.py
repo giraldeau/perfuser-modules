@@ -12,7 +12,12 @@ def build():
         run("echo $(pwd)")
         run("make clean")
         run("make")
+        sudo("make modules_install")
+        sudo("depmod -a")
+        sudo("modprobe perfuser")
+"""
     with cd("~/perfuser/tests"):
         run("make clean")
         run("make")
         run("./test-all.sh")
+"""

@@ -49,12 +49,12 @@
 		</cconfiguration>
 	</storageModule>
 	<storageModule moduleId="cdtBuildSystem" version="4.0.0">
-		<project id="perfuser.null.1021996628" name="perfuser"/>
+		<project id="perfuser-modules.null.1021996628" name="perfuser-modules"/>
 	</storageModule>
 	<storageModule moduleId="org.eclipse.cdt.core.LanguageSettingsProviders"/>
 	<storageModule moduleId="refreshScope" versionNumber="2">
 		<configuration configurationName="Default">
-			<resource resourceType="PROJECT" workspacePath="/perfuser"/>
+			<resource resourceType="PROJECT" workspacePath="/perfuser-modules"/>
 		</configuration>
 	</storageModule>
 	<storageModule moduleId="scannerConfiguration">

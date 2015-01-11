@@ -1,7 +1,8 @@
-Perf user data
-=============
+Perfuser modules
+================
 
-Register user-space data buffer to copy when a perf sample is generated.
+Receive a signal when a perf sample is generated. This is the kernel
+module component.
 
 Building
 --------
@@ -35,7 +36,7 @@ Make sure your target kernel has the following config options enabled:
 Usage
 -----
 
-The API is a set of ioctl() on /proc/perf_event_user file. However, since this
-is a prototype, the API may change at any time. For usage examples, look under
-the `tests` directory.
+The API is a set of ioctl() on /proc/perfuser file. However, since this
+is a prototype, the API may change at any time. For usage examples, look
+at the project `perfuser`.
 

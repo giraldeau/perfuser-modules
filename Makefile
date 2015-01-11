@@ -38,4 +38,5 @@ clean:
 
 %.i: %.c
 	$(MAKE) -C $(KERNELDIR) M=$(PWD) $@
+
 endif # KERNELRELEASE

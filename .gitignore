@@ -30,6 +30,7 @@ modules.builtin
 *.lzma
 *.lzo
 *.gcno
+*.pyc
 cscope.*
 
 #
@@ -78,4 +79,3 @@ GTAGS
 *~
 \#*#
 
-tests/test_ioctl
