@@ -30,17 +30,40 @@ struct perfuser_val {
 	pid_t ptid;
 	int signo;
 	struct hlist_node hlist;
+	struct rcu_head rcu;
 };
 
-/* map<ptid, perfuser_client> */
+/* map<perfuser_key, perfuser_val> */
 static DEFINE_HASHTABLE(map, 3);
-static DEFINE_SPINLOCK(map_lock);
 
+/*
+ * RCU related functions
+ */
+static void perfuser_free_val_rcu(struct rcu_head *rcu)
+{
+	kfree(container_of(rcu, struct perfuser_val, rcu));
+}
+
+static struct perfuser_val*
+perfuser_find_val(struct perfuser_key *key, u32 hash)
+{
+	struct perfuser_val *val;
+
+	hash_for_each_possible_rcu(map, val, hlist, hash) {
+		if (key->ptid == val->ptid) {
+			return val;
+		}
+	}
+	return NULL;
+}
+
+/*
+ * Probe called when a perf sample is generated
+ */
 static int perf_output_sample_probe(struct kprobe *p, struct pt_regs *regs)
 {
 	int ret;
 	u32 hash;
-	struct hlist_node *next;
 	struct perfuser_key key;
 	struct perfuser_val *val;
 	struct task_struct *task;
@@ -49,13 +72,12 @@ static int perf_output_sample_probe(struct kprobe *p, struct pt_regs *regs)
 
 	key.ptid = task->pid;
 	hash = jhash(&key, sizeof(key), 0);
-	hash_for_each_possible_safe(map, val, next, hlist, hash) {
-		if (val->ptid != key.ptid)
-			continue;
-		/* send signal to this specific thread */
-		ret = send_sig_info(SIGUSR1, SEND_SIG_NOINFO, task);
-		break;
+	rcu_read_lock();
+	val = perfuser_find_val(&key, hash);
+	if (val) {
+		ret = send_sig_info(val->signo, SEND_SIG_NOINFO, task);
 	}
+	rcu_read_unlock();
 	return 0;
 }
 
@@ -72,11 +94,9 @@ static int check_signal(unsigned long sig)
 long perfuser_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	u32 hash;
-	unsigned long flags;
 	struct perfuser_key key;
 	struct perfuser_val *val;
 	struct perfuser_info info;
-	struct hlist_node *next;
 	struct task_struct *task = get_current();
 	int ret = 0;
 	int bkt;
@@ -96,37 +116,37 @@ long perfuser_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		if (!check_signal(info.sig))
 			return -EINVAL;
 		/* check if already registered */
-		hash_for_each_possible_safe(map, val, next, hlist, hash) {
-			if (val->ptid == key.ptid) {
-				return 0;
-			}
+		rcu_read_lock();
+		val = perfuser_find_val(&key, hash);
+		if (val) {
+			rcu_read_unlock();
+			break;
 		}
+		rcu_read_unlock();
 		/* do registration */
 		val = kzalloc(sizeof(struct perfuser_val), GFP_KERNEL);
 		val->ptid = key.ptid;
 		val->signo = info.sig;
-		spin_lock_irqsave(&map_lock, flags);
-		hash_add(map, &val->hlist, hash);
-		spin_unlock_irqrestore(&map_lock, flags);
+		hash_add_rcu(map, &val->hlist, hash);
 		printk("perfuser_ioctl register %p 0x%x 0x%lx\n", file, cmd, arg);
 		break;
 	case PERFUSER_UNREGISTER:
-		hash_for_each_possible_safe(map, val, next, hlist, hash) {
-			if (val->ptid != key.ptid)
-				continue;
-			spin_lock_irqsave(&map_lock, flags);
-			hash_del(&val->hlist);
-			spin_unlock_irqrestore(&map_lock, flags);
-			kfree(val);
-			break;
+		rcu_read_lock();
+		val = perfuser_find_val(&key, hash);
+		if (val) {
+			hash_del_rcu(&val->hlist);
+			call_rcu(&val->rcu, perfuser_free_val_rcu);
+			printk("perfuser_ioctl unregister %p 0x%x\n", file, cmd);
 		}
-		printk("perfuser_ioctl unregister %p 0x%x\n", file, cmd);
+		rcu_read_unlock();
 		break;
 	case PERFUSER_DEBUG:
 		printk("perfuser_ioctl debug\n");
-		hash_for_each_safe(map, bkt, next, val, hlist) {
+		rcu_read_lock();
+		hash_for_each_rcu(map, bkt, val, hlist) {
 			printk("perfuser_ioctl task registered %d %d\n", val->ptid, val->signo);
 		}
+		rcu_read_unlock();
 		break;
 	default:
 		ret = -ENOTSUPP;
@@ -168,7 +188,6 @@ int __init perfuser_init(void)
 	}
 	printk("kprobe_ftrace=%d\n", kprobe_ftrace(&perf_sample_kprobe));
 	printk("kprobe_optimized=%d\n", kprobe_optimized(&perf_sample_kprobe));
-
 	return ret;
 
 error:
@@ -181,8 +200,20 @@ module_init(perfuser_init);
 
 void __exit perfuser_exit(void)
 {
+	struct perfuser_val *val;
+	int bkt;
+
 	if (perfuser_proc_dentry)
 		remove_proc_entry(PERFUSER_PROC, NULL);
+
+	rcu_read_lock();
+	hash_for_each_rcu(map, bkt, val, hlist) {
+		hash_del_rcu(&val->hlist);
+		call_rcu(&val->rcu, perfuser_free_val_rcu);
+	}
+	rcu_read_unlock();
+	synchronize_rcu();
+
 	unregister_kprobe(&perf_sample_kprobe);
 }
 module_exit(perfuser_exit);

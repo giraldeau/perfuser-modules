@@ -42,6 +42,7 @@ def build_lib():
         run("make clean")
         run("make")
         run("make check")
+        run("cat tests/test-all.sh.log")
 
 @task
 def configure():
