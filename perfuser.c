@@ -18,6 +18,7 @@
 #include <linux/types.h>
 
 #include "wrapper/vmalloc.h"
+#include "wrapper/tracepoint.h"
 #include "perfuser-abi.h"
 
 static struct proc_dir_entry *perfuser_proc_dentry;
@@ -35,6 +36,17 @@ struct perfuser_val {
 
 /* map<perfuser_key, perfuser_val> */
 static DEFINE_HASHTABLE(map, 3);
+
+/*
+ * probe for sched_swich event
+ */
+static void perfuser_sched_switch_probe(void *__data, struct task_struct *prev,
+		struct task_struct *next)
+{
+	if (printk_ratelimit()) {
+		printk("sched_switch %p %p\n", prev, next);
+	}
+}
 
 /*
  * RCU related functions
@@ -186,6 +198,13 @@ int __init perfuser_init(void)
 		ret = -1;
 		goto error;
 	}
+
+	ret = lttng_wrapper_tracepoint_probe_register("sched_switch", perfuser_sched_switch_probe, NULL);
+	if (ret < 0) {
+		printk("tracepoint_probe_register failed, returned %d\n", ret);
+		goto error;
+	}
+
 	printk("kprobe_ftrace=%d\n", kprobe_ftrace(&perf_sample_kprobe));
 	printk("kprobe_optimized=%d\n", kprobe_optimized(&perf_sample_kprobe));
 	return ret;

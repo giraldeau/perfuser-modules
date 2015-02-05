@@ -18,12 +18,18 @@ enum perfuser_cmd {
 	PERFUSER_DEBUG = 3,
 };
 
+enum perfuser_feature {
+	SAMPLE_PERF = 0,
+	SAMPLE_BLOCKING = 1,
+};
+
 /*
  * Structure to exchange data from and to kernel module.
  */
 struct perfuser_info {
 	int cmd;
 	int sig;
+	int feature;
 } __attribute__((packed));
 
 /* Borrow some unused range of LTTng ioctl ;-) */
