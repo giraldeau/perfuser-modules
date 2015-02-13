@@ -148,6 +148,11 @@ long perfuser_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		}
 		rcu_read_unlock();
 		break;
+	case PERFUSER_SENDSIG:
+		if (!check_signal(info.sig))
+			return -EINVAL;
+		ret = send_sig_info(info.sig, SEND_SIG_NOINFO, task);
+		break;
 	default:
 		ret = -ENOTSUPP;
 		break;
