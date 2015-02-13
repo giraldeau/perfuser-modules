@@ -153,6 +153,8 @@ long perfuser_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 			return -EINVAL;
 		ret = send_sig_info(info.sig, SEND_SIG_NOINFO, task);
 		break;
+	case PERFUSER_NONE: // do nothing
+		break;
 	default:
 		ret = -ENOTSUPP;
 		break;
