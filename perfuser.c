@@ -16,6 +16,7 @@
 #include <linux/hashtable.h>
 #include <linux/jhash.h>
 #include <linux/types.h>
+#include <linux/irq_work.h>
 
 #include "wrapper/vmalloc.h"
 #include "perfuser-abi.h"
@@ -57,12 +58,9 @@ perfuser_find_val(struct perfuser_key *key, u32 hash)
 	return NULL;
 }
 
-/*
- * Probe called when a perf sample is generated
- */
-static int perf_output_sample_probe(struct kprobe *p, struct pt_regs *regs)
+static
+void perfuser_irq_work(struct irq_work *work)
 {
-	int ret;
 	u32 hash;
 	struct perfuser_key key;
 	struct perfuser_val *val;
@@ -70,14 +68,27 @@ static int perf_output_sample_probe(struct kprobe *p, struct pt_regs *regs)
 
 	task = get_current();
 
+	if (printk_ratelimit())
+		printk("perfuser_irq_work\n");
+
 	key.ptid = task->pid;
 	hash = jhash(&key, sizeof(key), 0);
 	rcu_read_lock();
 	val = perfuser_find_val(&key, hash);
-	if (val) {
-		ret = send_sig_info(val->signo, SEND_SIG_NOINFO, task);
+	if (val != NULL) {
+		send_sig_info(val->signo, SEND_SIG_NOINFO, task);
 	}
 	rcu_read_unlock();
+}
+
+static struct irq_work irq_w = { .func = perfuser_irq_work };
+
+/*
+ * Probe called when a perf sample is generated
+ */
+static int perf_output_sample_probe(struct kprobe *p, struct pt_regs *regs)
+{
+	irq_work_queue(&irq_w);
 	return 0;
 }
 
@@ -213,6 +224,10 @@ void __exit perfuser_exit(void)
 	if (perfuser_proc_dentry)
 		remove_proc_entry(PERFUSER_PROC, NULL);
 
+	unregister_kprobe(&perf_sample_kprobe);
+
+	irq_work_sync(&irq_w);
+
 	rcu_read_lock();
 	hash_for_each_rcu(map, bkt, val, hlist) {
 		hash_del_rcu(&val->hlist);
@@ -220,8 +235,6 @@ void __exit perfuser_exit(void)
 	}
 	rcu_read_unlock();
 	synchronize_rcu();
-
-	unregister_kprobe(&perf_sample_kprobe);
 }
 module_exit(perfuser_exit);
 
