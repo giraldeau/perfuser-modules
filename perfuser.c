@@ -71,7 +71,7 @@ void perfuser_irq_work(struct irq_work *work)
 	if (printk_ratelimit())
 		printk("perfuser_irq_work\n");
 
-	key.ptid = task->pid;
+	key.ptid = task->tgid;
 	hash = jhash(&key, sizeof(key), 0);
 	rcu_read_lock();
 	val = perfuser_find_val(&key, hash);
