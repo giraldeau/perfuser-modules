@@ -28,6 +28,19 @@ struct perfuser_info {
 	int sig;
 } __attribute__((packed));
 
+/*
+ * Extends siginfo_t to forward context.
+ */
+struct perfuser_siginfo {
+	union {
+		siginfo_t _info;
+		struct {
+			int _pad[4]; // preserve first fields of siginfo_t
+			int bidon;
+		} _perf;
+	};
+};
+
 /* Borrow some unused range of LTTng ioctl ;-) */
 #define PERFUSER_IOCTL 		_IO(0xF6, 0x90)
 

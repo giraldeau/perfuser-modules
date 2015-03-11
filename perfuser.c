@@ -76,6 +76,8 @@ void perfuser_irq_work(struct irq_work *work)
 	rcu_read_lock();
 	val = perfuser_find_val(&key, hash);
 	if (val != NULL) {
+		struct siginfo sig;
+		sig.si_code = SI_KERNEL;
 		send_sig_info(val->signo, SEND_SIG_NOINFO, task);
 	}
 	rcu_read_unlock();
@@ -160,10 +162,17 @@ long perfuser_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		rcu_read_unlock();
 		break;
 	case PERFUSER_SENDSIG:
+	{
+		struct perfuser_siginfo si;
 		if (!check_signal(info.sig))
 			return -EINVAL;
-		ret = send_sig_info(info.sig, SEND_SIG_NOINFO, task);
+		si._info.si_signo = info.sig;
+		si._info.si_errno = 0;
+		si._info.si_code = SI_KERNEL;
+		si._perf.bidon = 42;
+		ret = send_sig_info(info.sig, (void *) &si, task);
 		break;
+	}
 	case PERFUSER_NONE: // do nothing
 		break;
 	default:
