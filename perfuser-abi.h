@@ -8,6 +8,9 @@
 #ifndef PERFUSER_ABI_H_
 #define PERFUSER_ABI_H_
 
+#include <linux/types.h>
+#include <linux/signal.h>
+
 #define PERFUSER_PROC "perfuser"
 #define PERFUSER_PATH "/proc/" PERFUSER_PROC
 
@@ -25,7 +28,7 @@ enum perfuser_cmd {
  */
 struct perfuser_info {
 	int cmd;
-	int sig;
+	int signo;
 } __attribute__((packed));
 
 /*
@@ -36,7 +39,8 @@ struct perfuser_siginfo {
 		siginfo_t _info;
 		struct {
 			int _pad[4]; // preserve first fields of siginfo_t
-			int bidon;
+			__u32 type;
+			__u64 config;
 		} _perf;
 	};
 };

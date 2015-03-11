@@ -17,6 +17,7 @@
 #include <linux/jhash.h>
 #include <linux/types.h>
 #include <linux/irq_work.h>
+#include <linux/percpu.h>
 
 #include "wrapper/vmalloc.h"
 #include "perfuser-abi.h"
@@ -24,18 +25,22 @@
 static struct proc_dir_entry *perfuser_proc_dentry;
 
 struct perfuser_key {
-	pid_t ptid;
+	pid_t tgid;
 } __attribute__((__packed__));
 
 struct perfuser_val {
-	pid_t ptid;
+	pid_t tgid;
 	int signo;
+	struct perfuser_siginfo info;
 	struct hlist_node hlist;
 	struct rcu_head rcu;
 };
 
+
 /* map<perfuser_key, perfuser_val> */
 static DEFINE_HASHTABLE(map, 3);
+
+DEFINE_SPINLOCK(map_lock);
 
 /*
  * RCU related functions
@@ -46,23 +51,68 @@ static void perfuser_free_val_rcu(struct rcu_head *rcu)
 }
 
 static struct perfuser_val*
-perfuser_find_val(struct perfuser_key *key, u32 hash)
+perfuser_find_val(struct task_struct *task)
 {
+	u32 hash;
+	struct perfuser_key key;
 	struct perfuser_val *val;
 
+	key.tgid = task->tgid;
+	hash = jhash(&key, sizeof(key), 0);
 	hash_for_each_possible_rcu(map, val, hlist, hash) {
-		if (key->ptid == val->ptid) {
+		if (key.tgid == val->tgid) {
 			return val;
 		}
 	}
 	return NULL;
 }
 
-static
-void perfuser_irq_work(struct irq_work *work)
+static int
+perfuser_register(struct task_struct *task, int signo)
 {
 	u32 hash;
 	struct perfuser_key key;
+	struct perfuser_val *val;
+
+	rcu_read_lock();
+	val = perfuser_find_val(task);
+	if (val) {
+		rcu_read_unlock();
+		return 0;
+	}
+	rcu_read_unlock();
+
+	val = kzalloc(sizeof(struct perfuser_val), GFP_KERNEL);
+	if (!val)
+		return -ENOMEM;
+	val->signo = signo;
+	val->tgid = task->tgid;
+	key.tgid = task->tgid;
+	hash = jhash(&key, sizeof(key), 0);
+	spin_lock(&map_lock);
+	hash_add_rcu(map, &val->hlist, hash);
+	spin_unlock(&map_lock);
+	return 0;
+}
+
+static void perfuser_unregister(struct task_struct *task)
+{
+	struct perfuser_val *val;
+
+	rcu_read_lock();
+	val = perfuser_find_val(task);
+	if (val) {
+		spin_lock(&map_lock);
+		hash_del_rcu(&val->hlist);
+		spin_unlock(&map_lock);
+		call_rcu(&val->rcu, perfuser_free_val_rcu);
+	}
+	rcu_read_unlock();
+}
+
+static
+void perfuser_irq_work(struct irq_work *entry)
+{
 	struct perfuser_val *val;
 	struct task_struct *task;
 
@@ -71,14 +121,10 @@ void perfuser_irq_work(struct irq_work *work)
 	if (printk_ratelimit())
 		printk("perfuser_irq_work\n");
 
-	key.ptid = task->tgid;
-	hash = jhash(&key, sizeof(key), 0);
 	rcu_read_lock();
-	val = perfuser_find_val(&key, hash);
+	val = perfuser_find_val(task);
 	if (val != NULL) {
-		struct siginfo sig;
-		sig.si_code = SI_KERNEL;
-		send_sig_info(val->signo, SEND_SIG_NOINFO, task);
+		send_sig_info(val->signo, (void *)&val->info, task);
 	}
 	rcu_read_unlock();
 }
@@ -90,7 +136,24 @@ static struct irq_work irq_w = { .func = perfuser_irq_work };
  */
 static int perf_output_sample_probe(struct kprobe *p, struct pt_regs *regs)
 {
+	struct perfuser_val *val;
+	struct perf_output_handle *handle = (void *) regs->di;
+
+	rcu_read_lock();
+	val = perfuser_find_val(get_current());
+	if (val && handle && handle->event) {
+		val->info._perf.type = handle->event->attr.type;
+		val->info._perf.config = handle->event->attr.config;
+	}
+	rcu_read_unlock();
 	irq_work_queue(&irq_w);
+
+	/*
+	if (handle || handle->event) {
+		printk("handle->event->attr.type=%d\n", handle->event->attr.type);
+		printk("handle->event->attr.config=%llu\n", handle->event->attr.config);
+	}
+	*/
 	return 0;
 }
 
@@ -106,8 +169,6 @@ static int check_signal(unsigned long sig)
 
 long perfuser_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
-	u32 hash;
-	struct perfuser_key key;
 	struct perfuser_val *val;
 	struct perfuser_info info;
 	struct task_struct *task = get_current();
@@ -121,56 +182,37 @@ long perfuser_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	if (copy_from_user(&info, uinfo, sizeof(struct perfuser_info)))
 		return -EFAULT;
 
-	key.ptid = task->pid;
-	hash = jhash(&key, sizeof(key), 0);
-
 	switch(info.cmd) {
 	case PERFUSER_REGISTER:
-		if (!check_signal(info.sig))
+		if (!check_signal(info.signo))
 			return -EINVAL;
-		/* check if already registered */
-		rcu_read_lock();
-		val = perfuser_find_val(&key, hash);
-		if (val) {
-			rcu_read_unlock();
-			break;
-		}
-		rcu_read_unlock();
 		/* do registration */
-		val = kzalloc(sizeof(struct perfuser_val), GFP_KERNEL);
-		val->ptid = key.ptid;
-		val->signo = info.sig;
-		hash_add_rcu(map, &val->hlist, hash);
+		ret = perfuser_register(task, info.signo);
 		printk("perfuser_ioctl register %p 0x%x 0x%lx\n", file, cmd, arg);
 		break;
 	case PERFUSER_UNREGISTER:
-		rcu_read_lock();
-		val = perfuser_find_val(&key, hash);
-		if (val) {
-			hash_del_rcu(&val->hlist);
-			call_rcu(&val->rcu, perfuser_free_val_rcu);
-			printk("perfuser_ioctl unregister %p 0x%x\n", file, cmd);
-		}
-		rcu_read_unlock();
+		perfuser_unregister(task);
+		printk("perfuser_ioctl unregister %p 0x%x\n", file, cmd);
 		break;
 	case PERFUSER_DEBUG:
 		printk("perfuser_ioctl debug\n");
 		rcu_read_lock();
 		hash_for_each_rcu(map, bkt, val, hlist) {
-			printk("perfuser_ioctl task registered %d %d\n", val->ptid, val->signo);
+			printk("perfuser_ioctl task registered %d %d\n", val->tgid, val->signo);
 		}
 		rcu_read_unlock();
 		break;
 	case PERFUSER_SENDSIG:
 	{
 		struct perfuser_siginfo si;
-		if (!check_signal(info.sig))
+		if (!check_signal(info.signo))
 			return -EINVAL;
-		si._info.si_signo = info.sig;
+		si._info.si_signo = info.signo;
 		si._info.si_errno = 0;
 		si._info.si_code = SI_KERNEL;
-		si._perf.bidon = 42;
-		ret = send_sig_info(info.sig, (void *) &si, task);
+		si._perf.type = PERF_TYPE_SOFTWARE;
+		si._perf.config = PERF_COUNT_SW_DUMMY;
+		ret = send_sig_info(info.signo, (void *) &si, task);
 		break;
 	}
 	case PERFUSER_NONE: // do nothing
