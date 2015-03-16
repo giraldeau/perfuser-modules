@@ -31,19 +31,11 @@ struct perfuser_info {
 	int signo;
 } __attribute__((packed));
 
-/*
- * Extends siginfo_t to forward context.
- */
-struct perfuser_siginfo {
-	union {
-		siginfo_t _info;
-		struct {
-			int _pad[4]; // preserve first fields of siginfo_t
-			__u32 type;
-			__u64 config;
-		} _perf;
-	};
-};
+struct perfuser_state {
+	int delayed;
+	int count;
+	unsigned long ts;
+} __attribute__((packed));
 
 /* Borrow some unused range of LTTng ioctl ;-) */
 #define PERFUSER_IOCTL 		_IO(0xF6, 0x90)
