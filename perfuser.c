@@ -27,14 +27,18 @@
 static struct proc_dir_entry *perfuser_proc_dentry;
 
 struct pkey {
-	struct task_struct *task;
+	pid_t pid;
 } __attribute__((__packed__));
 
 struct pval {
-	struct task_struct *task;
+	pid_t pid;
+	pid_t tgid;
 	int enabled;
 	int signo;
-	atomic_t count;
+	atomic_t count_sig;
+	atomic_t count_irq;
+	atomic_t count_nmi;
+	atomic_t count_err;
 	atomic_t delayed;
 	atomic_t ts;
 	struct irq_work irq_work;
@@ -62,18 +66,23 @@ static void perfuser_free_val_rcu(struct rcu_head *rcu)
 	 * I think irq_work_sync() is not required: synchronize_rcu()
 	 * makes sure no irq_work is in use.
 	 */
-	kfree(val);
+	kmem_cache_free(cachep, val);
 }
 
+#define MATCH_PID 0
+#define MATCH_TGID 1
 static struct pval*
-map_get(struct pkey *key)
+map_get(struct pkey *key, int group)
 {
 	u32 hash;
 	struct pval *val;
 
-	hash = jhash(&key, sizeof(key), 0);
+	hash = jhash(key, sizeof(*key), 0);
 	hash_for_each_possible_rcu(map, val, hlist, hash) {
-		if (key->task == val->task) {
+		if (group == MATCH_TGID && key->pid == val->tgid) {
+			return val;
+		}
+		if (group == MATCH_PID && key->pid == val->pid) {
 			return val;
 		}
 	}
@@ -82,13 +91,15 @@ map_get(struct pkey *key)
 static struct pval*
 map_put(struct pkey *key, struct pval *val)
 {
-	u32 hash = jhash(&key, sizeof(key), 0);
+	u32 hash = jhash(key, sizeof(*key), 0);
 	spin_lock(&lock);
 	hash_add_rcu(map, &val->hlist, hash);
 	spin_unlock(&lock);
 	return val;
 }
 
+/* Not necessary at this time */
+/*
 static struct pval*
 map_remove(struct pkey *key)
 {
@@ -100,36 +111,48 @@ map_remove(struct pkey *key)
 	}
 	return NULL;
 }
+*/
 
 static struct pval*
-perfuser_register(struct task_struct *task, int signo)
+perfuser_register(int pid, int tgid, int signo)
 {
-	struct pkey key = { .task = task };
+	struct pkey key = { .pid = pid };
 	struct pval *val;
 
 	val = kmem_cache_alloc(cachep, GFP_ATOMIC);
-	if (!val)
+	if (!val) {
+		WARN_ONCE(!val, "perfuser_register failed for pid=%d tgid=%d\n", pid, tgid);
 		return NULL;
+	}
 	memset(val, 0, sizeof(*val));
-	val->task = task;
+	val->pid = pid;
+	val->tgid = tgid;
 	val->enabled = 1;
 	val->signo = signo;
-	atomic_set(&val->count, 0);
+	atomic_set(&val->count_sig, 0);
+	atomic_set(&val->count_irq, 0);
+	atomic_set(&val->count_nmi, 0);
+	atomic_set(&val->count_err, 0);
 	atomic_set(&val->delayed, 0);
 	atomic_set(&val->ts, 0);
 	val->irq_work.func = perfuser_irq_work;
+	printk("perfuser_register %d %d\n", pid, tgid);
 	return map_put(&key, val);
 }
 
-static void perfuser_unregister(struct task_struct *task)
+static void perfuser_unregister(int tgid)
 {
+	int bkt;
 	struct pval *val;
-	struct pkey key = { .task = task };
 
 	rcu_read_lock();
-	val = map_remove(&key);
-	if (val) {
-		call_rcu(&val->rcu, perfuser_free_val_rcu);
+	hash_for_each_rcu(map, bkt, val, hlist) {
+		if (val->tgid == tgid) {
+			printk("perfuser_unregister %d %d\n", val->pid, val->tgid);
+			irq_work_sync(&val->irq_work);
+			hash_del_rcu(&val->hlist);
+			call_rcu(&val->rcu, perfuser_free_val_rcu);
+		}
 	}
 	rcu_read_unlock();
 }
@@ -138,15 +161,26 @@ static
 void perfuser_irq_work(struct irq_work *entry)
 {
 	struct pval *val;
+	int ret;
+	struct task_struct *task = get_current();
 
 	rcu_read_lock();
 	val = container_of(entry, struct pval, irq_work);
-	if (sigismember(&val->task->blocked, val->signo))
+
+	ret = task->pid != val->pid || task->tgid != val->tgid;
+	if (ret) {
+		WARN_ONCE(ret, "perfuser_irq_work task does not match pval\n");
+		rcu_read_unlock();
+		return;
+	}
+
+	if (sigismember(&task->blocked, val->signo))
 		atomic_inc(&val->delayed);
-	send_sig_info(val->signo, SEND_SIG_NOINFO, val->task);
+	atomic_inc(&val->count_irq);
+	ret = send_sig_info(val->signo, SEND_SIG_NOINFO, task);
+	if (ret == 0)
+		atomic_inc(&val->count_sig);
 	rcu_read_unlock();
-	if (printk_ratelimit())
-		printk("perfuser_irq_work\n");
 }
 
 /*
@@ -155,6 +189,7 @@ void perfuser_irq_work(struct irq_work *entry)
 static int perf_output_sample_probe(struct kprobe *p, struct pt_regs *regs)
 {
 	struct pval *val;
+	struct pval *val_sibling;
 	struct pkey key;
 	struct task_struct *task = get_current();
 	//struct perf_output_handle *handle = (void *) regs->di;
@@ -162,22 +197,24 @@ static int perf_output_sample_probe(struct kprobe *p, struct pt_regs *regs)
 	 * FIXME: is it possible to get migrated between the NMI and the IRQ?
 	 */
 	rcu_read_lock();
-	key.task = task;
-	val = map_get(&key);
+	key.pid = task->pid;
+	val = map_get(&key, MATCH_PID);
 	if (val)
 		goto found;
-	/* check if the group leader is registered */
-	key.task = task->group_leader;
-	val = map_get(&key);
-	if (!val)
+	/* check if a sibling thread is registered */
+	key.pid = task->tgid;
+	val_sibling = map_get(&key, MATCH_TGID);
+	if (!val_sibling)
 		goto out;
-	// the group leader is found, create entry for this thread
-	val = perfuser_register(task, val->signo);
-	if (!val)
+	val = perfuser_register(task->pid, task->tgid, val_sibling->signo);
+	if (!val) {
+		atomic_inc(&val_sibling->count_err);
 		goto out;
+	}
 
 found:
-	atomic_inc(&val->count);
+	printk("perf_output_sample_probe\n");
+	atomic_inc(&val->count_nmi);
 	irq_work_queue(&val->irq_work);
 out:
 	rcu_read_unlock();
@@ -204,31 +241,10 @@ ssize_t perfuser_read(struct file *file, char __user *buf, size_t count, loff_t 
 	return 0;
 }
 
-int perfuser_flush(struct file *file, fl_owner_t id)
-{
-	rcu_read_lock();
-	perfuser_unregister(get_current());
-	rcu_read_unlock();
-	printk("perfuser_flush %d\n", get_current()->pid);
-	return 0;
-}
-
 int perfuser_release(struct inode *inode, struct file *file)
 {
-	int bkt;
-	struct pval *val;
 	struct task_struct *task = get_current();
-
-	rcu_read_lock();
-	hash_for_each_rcu(map, bkt, val, hlist) {
-		if (val->task->group_leader == task->group_leader) {
-			irq_work_sync(&val->irq_work);
-			hash_del_rcu(&val->hlist);
-			call_rcu(&val->rcu, perfuser_free_val_rcu);
-		}
-	}
-	rcu_read_unlock();
-	printk("perfuser_release %d\n", get_current()->pid);
+	perfuser_unregister(task->tgid);
 	return 0;
 }
 
@@ -252,27 +268,33 @@ long perfuser_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	case PERFUSER_REGISTER:
 		if (!check_signal(info.signo))
 			return -EINVAL;
+		printk("perfuser_ioctl register %d %p 0x%x 0x%lx\n", ret, file, cmd, arg);
 		/* do registration of the group leader */
-		key.task = task->group_leader;
+		key.pid = task->pid;
 		rcu_read_lock();
-		val = map_get(&key);
-		if (!val) {
-			val = perfuser_register(task->group_leader, info.signo);
-		}
+		val = map_get(&key, MATCH_PID);
+		if (!val)
+			val = perfuser_register(task->pid, task->tgid, info.signo);
 		if (!val)
 			ret = -ENOMEM;
 		rcu_read_unlock();
-		printk("perfuser_ioctl register %d %p 0x%x 0x%lx\n", ret, file, cmd, arg);
 		break;
 	case PERFUSER_UNREGISTER:
-		perfuser_unregister(task->group_leader);
+		// unregister all threads
+		perfuser_unregister(task->tgid);
 		printk("perfuser_ioctl unregister %p 0x%x\n", file, cmd);
 		break;
 	case PERFUSER_DEBUG:
 		printk("perfuser_ioctl debug\n");
+		printk("%5s %5s %5s %5s %5s %5s\n", "pid", "tid", "nmi", "irq", "sig", "err");
 		rcu_read_lock();
 		hash_for_each_rcu(map, bkt, val, hlist) {
-			printk("perfuser_ioctl task registered %d %d %d\n", val->task->tgid, val->task->pid, val->signo);
+			printk("%5d %5d %5d %5d %5d %5d\n",
+					val->tgid, val->pid,
+					atomic_read(&val->count_nmi),
+					atomic_read(&val->count_irq),
+					atomic_read(&val->count_sig),
+					atomic_read(&val->count_err));
 		}
 		rcu_read_unlock();
 		break;
@@ -302,7 +324,6 @@ static const struct file_operations perfuser_fops = {
 	.owner = THIS_MODULE,
 	.open = perfuser_open,
 	.read = perfuser_read,
-	.flush = perfuser_flush,
 	.release = perfuser_release,
 	.unlocked_ioctl = perfuser_ioctl,
 #ifdef CONFIG_COMPAT
