@@ -20,6 +20,7 @@
 #include <linux/percpu.h>
 #include <linux/fs.h>
 #include <linux/slab.h>
+#include <linux/uaccess.h>
 
 #include "wrapper/vmalloc.h"
 #include "perfuser-abi.h"
@@ -39,7 +40,7 @@ struct pval {
 	atomic_t count_irq;
 	atomic_t count_nmi;
 	atomic_t count_err;
-	atomic_t delayed;
+	atomic_t count_blk;
 	atomic_t ts;
 	struct irq_work irq_work;
 	struct hlist_node hlist;
@@ -133,7 +134,7 @@ perfuser_register(int pid, int tgid, int signo)
 	atomic_set(&val->count_irq, 0);
 	atomic_set(&val->count_nmi, 0);
 	atomic_set(&val->count_err, 0);
-	atomic_set(&val->delayed, 0);
+	atomic_set(&val->count_blk, 0);
 	atomic_set(&val->ts, 0);
 	val->irq_work.func = perfuser_irq_work;
 	printk("perfuser_register %d %d\n", pid, tgid);
@@ -175,7 +176,7 @@ void perfuser_irq_work(struct irq_work *entry)
 	}
 
 	if (sigismember(&task->blocked, val->signo))
-		atomic_inc(&val->delayed);
+		atomic_inc(&val->count_blk);
 	atomic_inc(&val->count_irq);
 	ret = send_sig_info(val->signo, SEND_SIG_NOINFO, task);
 	if (ret == 0)
@@ -213,7 +214,6 @@ static int perf_output_sample_probe(struct kprobe *p, struct pt_regs *regs)
 	}
 
 found:
-	printk("perf_output_sample_probe\n");
 	atomic_inc(&val->count_nmi);
 	irq_work_queue(&val->irq_work);
 out:
@@ -231,21 +231,44 @@ static int check_signal(unsigned long sig)
 	return (sig == SIGUSR1 || sig == SIGUSR2);
 }
 
-int perfuser_open(struct inode *inode, struct file *file)
-{
-	return 0;
-}
-
-ssize_t perfuser_read(struct file *file, char __user *buf, size_t count, loff_t *offset)
-{
-	return 0;
-}
-
 int perfuser_release(struct inode *inode, struct file *file)
 {
 	struct task_struct *task = get_current();
 	perfuser_unregister(task->tgid);
 	return 0;
+}
+
+ssize_t perfuser_read(struct file *filep, char __user *uptr, size_t len, loff_t *loff)
+{
+	int err = 0;
+	struct perfuser_stats __user *ustats = (void *) uptr;
+	struct pval *val;
+	struct pkey key;
+
+	if (len != sizeof(*ustats))
+		return -EINVAL;
+
+	key.pid = current->pid;
+	rcu_read_lock();
+	val = map_get(&key, MATCH_PID);
+	if (!val) {
+		err = -ENOENT;
+		goto out;
+	}
+
+	put_user_try {
+		put_user_ex(atomic_read(&val->count_nmi), &ustats->nmi);
+		put_user_ex(atomic_read(&val->count_irq), &ustats->irq);
+		put_user_ex(atomic_read(&val->count_sig), &ustats->sig);
+		put_user_ex(atomic_read(&val->count_blk), &ustats->blk);
+		put_user_ex(atomic_read(&val->count_err), &ustats->err);
+		put_user_ex(atomic_read(&val->ts), &ustats->ts);
+	} put_user_catch(err);
+	if (!err)
+		err = len;
+out:
+	rcu_read_unlock();
+	return err;
 }
 
 long perfuser_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
@@ -300,14 +323,12 @@ long perfuser_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		break;
 	case PERFUSER_SENDSIG:
 	{
-		siginfo_t si = {
-			.si_signo = info.signo,
-			.si_errno = 0,
-			.si_code = SI_KERNEL,
-		};
-		if (!check_signal(info.signo))
-			return -EINVAL;
-		ret = send_sig_info(info.signo, (void *) &si, task);
+		key.pid = task->pid;
+		rcu_read_lock();
+		val = map_get(&key, MATCH_PID);
+		if (val)
+			irq_work_queue(&val->irq_work);
+		rcu_read_unlock();
 		break;
 	}
 	case PERFUSER_NONE: // do nothing
@@ -322,7 +343,6 @@ long perfuser_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 
 static const struct file_operations perfuser_fops = {
 	.owner = THIS_MODULE,
-	.open = perfuser_open,
 	.read = perfuser_read,
 	.release = perfuser_release,
 	.unlocked_ioctl = perfuser_ioctl,

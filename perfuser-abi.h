@@ -31,9 +31,15 @@ struct perfuser_info {
 	int signo;
 } __attribute__((packed));
 
-struct perfuser_state {
-	int delayed;
-	int count;
+/*
+ * Forward statistics to user-space.
+ */
+struct perfuser_stats {
+	int nmi;
+	int irq;
+	int sig;
+	int blk;
+	int err;
 	unsigned long ts;
 } __attribute__((packed));
 

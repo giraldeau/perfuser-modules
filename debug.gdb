@@ -13,4 +13,3 @@ define lsmod
                 set $current = $current.next 
         end
 end
-
