@@ -1,3 +1,7 @@
+Disclaimer: This kernel module is not necessary to get a signal when a perf event occurs. Instead, use the fasync operation of the event file descriptor returned by perf_event_open(). 
+==========
+
+
 Perfuser modules
 ================
 
