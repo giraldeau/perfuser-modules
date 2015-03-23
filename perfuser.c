@@ -21,6 +21,7 @@
 #include <linux/fs.h>
 #include <linux/slab.h>
 #include <linux/uaccess.h>
+#include <linux/file.h>
 
 #include "wrapper/vmalloc.h"
 #include "perfuser-abi.h"
@@ -271,6 +272,28 @@ out:
 	return err;
 }
 
+static struct file_operation *perf_fops_addr;
+
+static inline int perf_fget_light(int fd, struct fd *p)
+{
+	struct fd f = fdget(fd);
+	if (!f.file)
+		return -EBADF;
+
+	if (f.file->f_op != (void *)perf_fops_addr) {
+		fdput(f);
+		return -EBADF;
+	}
+	*p = f;
+	return 0;
+}
+
+void irq_work_dummy(struct irq_work *work)
+{
+	printk("inside irq_work_dummy\n");
+	//old_func(work);
+}
+
 long perfuser_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	struct pval *val;
@@ -333,6 +356,22 @@ long perfuser_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	}
 	case PERFUSER_NONE: // do nothing
 		break;
+	case PERFUSER_OVERLOAD:
+	{
+		int ret;
+		struct fd f;
+		struct perf_event *event;
+		memset(&f, 0, sizeof(f));
+		ret = perf_fget_light(info.fd, &f);
+		printk("hello PERFUSER_OVERLOAD ret=%d fd=%d file=%p\n", ret, info.fd, f.file);
+		if (!f.file)
+			break;
+		event = f.file->private_data;
+		//old_func = event->pending->func;
+		init_irq_work(&event->pending, irq_work_dummy);
+		printk("perf_event=%p\n", event);
+		break;
+	}
 	default:
 		ret = -ENOTSUPP;
 		break;
@@ -366,6 +405,8 @@ int __init perfuser_init(void)
 		ret = -ENOMEM;
 		goto error;
 	}
+
+	perf_fops_addr = (void *) kallsyms_lookup_funcptr("perf_fops");
 
 	cachep = KMEM_CACHE(pval, 0);
 

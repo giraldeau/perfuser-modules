@@ -21,6 +21,7 @@ enum perfuser_cmd {
 	PERFUSER_DEBUG = 3,
 	PERFUSER_SENDSIG = 4, /* benchmark purpose */
 	PERFUSER_NONE = 5,
+	PERFUSER_OVERLOAD = 6,
 };
 
 /*
@@ -29,6 +30,7 @@ enum perfuser_cmd {
 struct perfuser_info {
 	int cmd;
 	int signo;
+	int fd;
 } __attribute__((packed));
 
 /*
